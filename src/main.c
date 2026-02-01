@@ -4,182 +4,141 @@
 #include <omp.h>
 #include <time.h>
 #include "cnn.h"
+#include "layers/conv.h"
+#include "layers/full.h"
 #include "utils/data_loader.h"
-#include "layers/conv.h"   
-#include "layers/full.h"   
 
 #define BATCH_SIZE 32
 #define LEARNING_RATE 0.01f
-#define EPOCHS 5
 
 void sync_gradients(Network* net, int world_size) {
-    {
-        int count = net->conv1->grad_weights->total_size;
-        float* local_grads = net->conv1->grad_weights->data;
-        float* global_grads = (float*)malloc(count * sizeof(float));
+    // 1. Conv1 Weights
+    MPI_Allreduce(MPI_IN_PLACE, net->conv1->grad_weights->data, net->conv1->grad_weights->total_size, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE, net->conv1->grad_biases->data, net->conv1->grad_biases->total_size, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
+    // 2. FC1 Weights
+    MPI_Allreduce(MPI_IN_PLACE, net->fc1->grad_weights->data, net->fc1->grad_weights->total_size, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE, net->fc1->grad_biases->data, net->fc1->grad_biases->total_size, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
+    
+    // Average
+    float scale = 1.0f / world_size;
+    int s1 = net->conv1->grad_weights->total_size;
+    #pragma omp parallel for
+    for(int i=0; i<s1; i++) net->conv1->grad_weights->data[i] *= scale;
+    
+    int s2 = net->conv1->grad_biases->total_size;
+    #pragma omp parallel for
+    for(int i=0; i<s2; i++) net->conv1->grad_biases->data[i] *= scale;
 
-        // MPI Allreduce: Sums all local_grads into global_grads and distributes back to everyone
-        MPI_Allreduce(local_grads, global_grads, count, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
+    int s3 = net->fc1->grad_weights->total_size;
+    #pragma omp parallel for
+    for(int i=0; i<s3; i++) net->fc1->grad_weights->data[i] *= scale;
 
-        // Average and write back
-        #pragma omp parallel for
-        for (int i = 0; i < count; i++) {
-            local_grads[i] = global_grads[i] / world_size;
-        }
-        free(global_grads);
-    }
-
-    // 2. Conv1 Biases
-    {
-        int count = net->conv1->grad_biases->total_size;
-        float* local_grads = net->conv1->grad_biases->data;
-        float* global_grads = (float*)malloc(count * sizeof(float));
-
-        MPI_Allreduce(local_grads, global_grads, count, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
-
-        #pragma omp parallel for
-        for (int i = 0; i < count; i++) {
-            local_grads[i] = global_grads[i] / world_size;
-        }
-        free(global_grads);
-    }
-
-    // 3. FC1 Weights
-    {
-        int count = net->fc1->grad_weights->total_size;
-        float* local_grads = net->fc1->grad_weights->data;
-        float* global_grads = (float*)malloc(count * sizeof(float));
-
-        MPI_Allreduce(local_grads, global_grads, count, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
-
-        #pragma omp parallel for
-        for (int i = 0; i < count; i++) {
-            local_grads[i] = global_grads[i] / world_size;
-        }
-        free(global_grads);
-    }
-
-    // 4. FC1 Biases
-    {
-        int count = net->fc1->grad_biases->total_size;
-        float* local_grads = net->fc1->grad_biases->data;
-        float* global_grads = (float*)malloc(count * sizeof(float));
-
-        MPI_Allreduce(local_grads, global_grads, count, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
-
-        #pragma omp parallel for
-        for (int i = 0; i < count; i++) {
-            local_grads[i] = global_grads[i] / world_size;
-        }
-        free(global_grads);
-    }
+    int s4 = net->fc1->grad_biases->total_size;
+    #pragma omp parallel for
+    for(int i=0; i<s4; i++) net->fc1->grad_biases->data[i] *= scale;
 }
 
 int main(int argc, char** argv) {
-    // --- 1. Initialize MPI ---
     MPI_Init(&argc, &argv);
 
     int rank, world_size;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &world_size);
 
-    // Set Random Seed (Critical: Must be different per rank if shuffling, 
-    // but here we want consistent weight init if we didn't broadcast them.
-    // However, our logic initializes weights independently. For true sync, 
-    // we should broadcast weights from Rank 0, but for simplicity, we seed same.)
-    srand(42); 
-
-    if (rank == 0) {
-        printf("==================================================\n");
-        printf(" Distributed CNN Training (C + MPI + OpenMP)\n");
-        printf(" Nodes: %d | OpenMP Threads: %d\n", world_size, omp_get_max_threads());
-        printf("==================================================\n");
+    // 1. Parse Epochs from Command Line
+    int epochs = 5; // Default
+    if (argc > 1) {
+        epochs = atoi(argv[1]);
     }
 
-    // --- 2. Load Data ---
-    // Make sure you have the files in data/ directory
-    // or change paths to matches your setup
-    const char* img_path = "../data/custom-images-idx3-ubyte";
-    const char* lbl_path = "../data/custom-labels-idx1-ubyte";
+    // 2. Load Training Data
+    const char* tr_img = "../data/custom-images-idx3-ubyte";
+    const char* tr_lbl = "../data/custom-labels-idx1-ubyte";
+    MNISTData train_data = load_mnist_distributed(tr_img, tr_lbl, rank, world_size);
 
-    if (rank == 0) printf("Loading Data...\n");
-    
-    // Each rank loads ONLY its partition of the data
-    MNISTData data = load_mnist_distributed(img_path, lbl_path, rank, world_size);
+    const char* te_img = "../data/custom_test-images-idx3-ubyte";
+    const char* te_lbl = "../data/custom_test-labels-idx1-ubyte";
+    MNISTData test_data = load_mnist_distributed(te_img, te_lbl, rank, world_size);
 
-    // --- 3. Build Network ---
     Network* net = build_network(BATCH_SIZE);
-
-    // Sync Initial Weights (Optional but recommended so everyone starts same)
-    // In a production system, Rank 0 would broadcast weights here.
-    // For this example, relying on identical srand(42) is "good enough".
-
-    // --- 4. Training Loop ---
+    
+    // Setup Training Batch Tensors
     Tensor* batch_input = create_tensor(BATCH_SIZE, 1, 28, 28);
-    unsigned char* batch_labels = (unsigned char*)malloc(BATCH_SIZE * sizeof(unsigned char));
+    unsigned char* batch_labels = (unsigned char*)malloc(BATCH_SIZE);
+    
+    // Prepare temporary Tensor wrapper for the full local dataset (for evaluation)
+    Tensor* local_test_tensor = create_tensor(test_data.size, 1, 28, 28);
+    // Copy data once to avoid recopying during eval loop
+    #pragma omp parallel for
+    for(int i=0; i<test_data.size * 784; i++) local_test_tensor->data[i] = test_data.images[i];
 
-    int num_batches = data.size / BATCH_SIZE;
 
-    for (int epoch = 0; epoch < EPOCHS; ++epoch) {
-        double start_time = MPI_Wtime();
+    double total_start_time = MPI_Wtime();
+
+    for (int epoch = 0; epoch < epochs; ++epoch) {
         float epoch_loss = 0.0f;
+        int num_batches = train_data.size / BATCH_SIZE;
         
+        // --- TRAINING LOOP ---
         for (int b = 0; b < num_batches; ++b) {
-            
-            // A. Prepare Batch
-            // Copy data from our large loaded array into the mini-batch tensor
             int offset = b * BATCH_SIZE;
             
-            // Copy Images (Parallelized copy)
-            int img_size = 28 * 28;
+            // Load Batch
             #pragma omp parallel for
-            for (int i = 0; i < BATCH_SIZE * img_size; i++) {
-                batch_input->data[i] = data.images[offset * img_size + i];
+            for (int i = 0; i < BATCH_SIZE * 784; i++) {
+                batch_input->data[i] = train_data.images[offset * 784 + i];
             }
+            for (int i = 0; i < BATCH_SIZE; i++) batch_labels[i] = train_data.labels[offset + i];
 
-            // Copy Labels
-            for (int i = 0; i < BATCH_SIZE; i++) {
-                batch_labels[i] = data.labels[offset + i];
-            }
-
-            // B. Local Compute (Forward + Backward)
-            // Returns loss and populates gradient buffers
-            float loss = forward_backward_pass(net, batch_input, batch_labels, LEARNING_RATE);
-            epoch_loss += loss;
-
-            // C. Distributed Synchronization
-            // Sum gradients from all ranks and average them
+            // Train Step
+            epoch_loss += forward_backward_pass(net, batch_input, batch_labels, LEARNING_RATE);
             sync_gradients(net, world_size);
-
-            // D. Optimizer Step
-            // Apply the globally averaged gradients
             optimizer_step(net, LEARNING_RATE);
-
-            // Logging (Rank 0 only)
-            if (rank == 0 && b % 10 == 0) {
-                printf("\rEpoch %d | Batch %d/%d | Loss: %.4f", epoch+1, b, num_batches, loss);
-                fflush(stdout);
-            }
         }
 
-        double end_time = MPI_Wtime();
-        
-        // Aggregate total loss across all ranks for reporting
+        // --- EVALUATION (TEST ACCURACY) ---
+        // 1. Calculate Local Accuracy
+        int local_correct = evaluate_accuracy(net, local_test_tensor, test_data.labels, test_data.size);
+        int local_total = test_data.size;
+
+        // 2. Reduce to Global Accuracy
+        int global_correct = 0;
+        int global_total_test_samples = 0;
+
+        MPI_Reduce(&local_correct, &global_correct, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+        MPI_Reduce(&local_total, &global_total_test_samples, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+
+        // 3. Aggregate Loss
         float global_loss = 0.0f;
         MPI_Reduce(&epoch_loss, &global_loss, 1, MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
         
+        // 4. Log Metrics (Only Rank 0 prints)
         if (rank == 0) {
-            printf("\rEpoch %d Completed in %.2f sec | Avg Loss: %.4f\n", 
-                   epoch+1, end_time - start_time, global_loss / (world_size * num_batches));
+            float avg_loss = global_loss / (world_size * num_batches);
+            float accuracy = (float)global_correct / (float)global_total_test_samples;
+            
+            // Print readable log
+            printf("Epoch %d | Loss: %.4f | Test Acc: %.4f%%\n", epoch+1, avg_loss, accuracy * 100.0f);
+            
+            // Print Parsable Log for Python (PREFIX: METRICS)
+            printf("METRICS,%d,%.4f,%.4f\n", epoch+1, avg_loss, accuracy);
+            fflush(stdout);
         }
     }
 
-    // --- 5. Cleanup ---
+    double total_end_time = MPI_Wtime();
+    if (rank == 0) {
+        printf("TIME_TOTAL,%f\n", total_end_time - total_start_time);
+    }
+
+    // Cleanup
     free_network(net);
     free_tensor(batch_input);
+    free_tensor(local_test_tensor);
     free(batch_labels);
-    free_mnist_data(&data);
-
+    free_mnist_data(&train_data);
+    free_mnist_data(&test_data);
+    
     MPI_Finalize();
     return 0;
 }

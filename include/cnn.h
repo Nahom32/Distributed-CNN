@@ -37,5 +37,5 @@ void free_network(Network* net);
 float forward_backward_pass(Network* net, Tensor* input_data, unsigned char* labels, float learning_rate);
 
 void optimizer_step(Network* net, float learning_rate);
-
+int evaluate_accuracy(Network* net, Tensor* input_data, unsigned char* labels, int count);
 #endif

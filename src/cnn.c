@@ -174,3 +174,59 @@ void free_network(Network* net) {
     // free(net->fc1);
     free(net);
 }
+
+int argmax(float* data, int size) {
+    int max_idx = 0;
+    float max_val = data[0];
+    for (int i = 1; i < size; i++) {
+        if (data[i] > max_val) {
+            max_val = data[i];
+            max_idx = i;
+        }
+    }
+    return max_idx;
+}
+
+int evaluate_accuracy(Network* net, Tensor* input_data, unsigned char* labels, int count) {
+    int correct = 0;
+    int batch_size = net->input->b; // Should match what the net was built with
+    
+    // Create temporary tensor wrappers
+    Tensor* batch_input = create_tensor(batch_size, 1, 28, 28);
+    
+    // Loop through data in chunks of 'batch_size'
+    for (int i = 0; i < count; i += batch_size) {
+        int current_batch = (i + batch_size > count) ? (count - i) : batch_size;
+        
+        // 1. Load Batch
+        // Note: For simplicity in this eval function, we copy row by row
+        // In production, you'd handle the last partial batch carefully.
+        // Here we assume dataset size is divisible or we just drop the last few for speed.
+        if (current_batch < batch_size) break; 
+
+        int img_size = 28 * 28;
+        #pragma omp parallel for
+        for (int k = 0; k < batch_size * img_size; k++) {
+            batch_input->data[k] = input_data->data[(i * img_size) + k];
+        }
+
+        // 2. Forward Pass Only (No Backward, No Loss Calc)
+        conv2d_forward(net->conv1, batch_input, net->t_conv1_out);
+        relu_forward(net->t_conv1_out, net->t_relu_out);
+        max_pool_forward(net->t_relu_out, net->t_pool_out, 2, 2);
+        fc_forward(net->fc1, net->t_pool_out, net->t_fc_out);
+
+        // 3. Check Predictions
+        for (int b = 0; b < batch_size; b++) {
+            // Logits for this image are at: net->t_fc_out->data[b * 10]
+            int predicted = argmax(&net->t_fc_out->data[b * 10], 10);
+            int actual = (int)labels[i + b];
+            if (predicted == actual) {
+                correct++;
+            }
+        }
+    }
+    
+    free_tensor(batch_input);
+    return correct;
+}
