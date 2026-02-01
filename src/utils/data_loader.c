@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "data_loader.h"
+#include "utils/data_loader.h"
 
 #define IMAGES_HEADER_SIZE 16
 #define LABELS_HEADER_SIZE 8

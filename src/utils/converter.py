@@ -6,7 +6,7 @@ import struct
 from config import *
 
 
-def write_idx_files(images, labels, prefix="custom"):
+def write_idx_files(images, labels, prefix="custom_test"):
     """
     Converts raw numpy arrays into the IDX format expected by the C loader.
     """
