@@ -1,215 +1,176 @@
-#include <stdlib.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <math.h>
+#include <string.h>
 #include <omp.h>
+
+#include "cnn.h"
 #include "layers/conv.h"
+#include "layers/pool.h"
+#include "layers/full.h"
 
-// Helper: Initialize weights with Xavier Initialization
-void init_weights(Tensor* t, int fan_in, int fan_out) {
-    float limit = sqrtf(6.0f / (float)(fan_in + fan_out));
-    for (int i = 0; i < t->total_size; ++i) {
-        // Generate random float between -limit and limit
-        float r = (float)rand() / (float)RAND_MAX;
-        t->data[i] = (r * 2.0f * limit) - limit;
+Tensor* create_tensor(int b, int c, int h, int w) {
+    Tensor* t = (Tensor*)malloc(sizeof(Tensor));
+    t->b = b; t->c = c; t->h = h; t->w = w;
+    t->total_size = (size_t)b * c * h * w;
+    t->data = (float*)calloc(t->total_size, sizeof(float)); // Init to 0
+    return t;
+}
+
+void free_tensor(Tensor* t) {
+    if (t) { free(t->data); free(t); }
+}
+
+void relu_forward(Tensor* input, Tensor* output) {
+    #pragma omp parallel for
+    for (int i = 0; i < input->total_size; i++) {
+        output->data[i] = (input->data[i] > 0.0f) ? input->data[i] : 0.0f;
     }
 }
 
-ConvLayer* create_conv_layer(int in_c, int out_c, int k_size, int in_h, int in_w) {
-    ConvLayer* layer = (ConvLayer*)malloc(sizeof(ConvLayer));
-    
-    layer->input_channels = in_c;
-    layer->output_channels = out_c;
-    layer->kernel_size = k_size;
-    
-    int out_h = in_h - k_size + 1; // Assuming stride=1, padding=0
-    int out_w = in_w - k_size + 1;
-
-    layer->weights = create_tensor(out_c, in_c, k_size, k_size);
-    layer->grad_weights = create_tensor(out_c, in_c, k_size, k_size);
-    
-    // Biases: [Out_Channels]
-    layer->biases = create_tensor(1, out_c, 1, 1);
-    layer->grad_biases = create_tensor(1, out_c, 1, 1);
-
-    // Initialize
-    int fan_in = in_c * k_size * k_size;
-    int fan_out = out_c * k_size * k_size;
-    init_weights(layer->weights, fan_in, fan_out);
-    
-    // Zero out biases
-    for(int i=0; i<layer->biases->total_size; i++) layer->biases->data[i] = 0.0f;
-
-    return layer;
+void relu_backward(Tensor* input, Tensor* output_grad, Tensor* input_grad) {
+    #pragma omp parallel for
+    for (int i = 0; i < input->total_size; i++) {
+        // Gradient passes through if input > 0, else 0
+        input_grad->data[i] = (input->data[i] > 0.0f) ? output_grad->data[i] : 0.0f;
+    }
 }
 
-// ------------------------------------------------------------------
-// FORWARD PASS
-// Formula: Output[b, k, i, j] = Sum(Input[b, c, i+m, j+n] * Weight[k, c, m, n]) + Bias[k]
-// ------------------------------------------------------------------
-void conv2d_forward(ConvLayer* layer, Tensor* input, Tensor* output) {
-    int batch = input->b;
-    int out_c = layer->output_channels;
-    int in_c = layer->input_channels;
-    int k_size = layer->kernel_size;
-    int out_h = output->h;
-    int out_w = output->w;
+float softmax_loss_backward(Tensor* logits, unsigned char* labels, Tensor* grad_input) {
+    int batch = logits->b;
+    int classes = logits->w; // FC output is [Batch, 1, 1, 10]
+    float total_loss = 0.0f;
 
-    // #pragma omp parallel for
-    for(int i=0; i<output->total_size; i++) output->data[i] = 0.0f;
+    for (int b = 0; b < batch; b++) {
+        
+        float max_val = -1e9;
+        for (int c = 0; c < classes; c++) {
+            float val = logits->data[b * classes + c];
+            if (val > max_val) max_val = val;
+        }
 
-    // Parallelize over Batch and Output Channels (The "Independent" units)
-    #pragma omp parallel for collapse(2)
-    for (int b = 0; b < batch; ++b) {
-        for (int k = 0; k < out_c; ++k) {
+        float sum_exp = 0.0f;
+        for (int c = 0; c < classes; c++) {
+            float val = expf(logits->data[b * classes + c] - max_val);
+            grad_input->data[b * classes + c] = val;
+            sum_exp += val;
+        }
+
+        int correct_label = (int)labels[b];
+        
+        for (int c = 0; c < classes; c++) {
+            float prob = grad_input->data[b * classes + c] / sum_exp;
             
-            // Get Bias for this filter
-            float bias_val = layer->biases->data[k];
-
-            // Iterate over output spatial dimensions
-            for (int i = 0; i < out_h; ++i) {
-                for (int j = 0; j < out_w; ++j) {
-                    
-                    float sum = 0.0f;
-
-                    // Convolution: Dot product of Kernel and Input Patch
-                    for (int c = 0; c < in_c; ++c) {
-                        for (int m = 0; m < k_size; ++m) {
-                            for (int n = 0; n < k_size; ++n) {
-                                
-                                // Input Index: [b, c, i+m, j+n]
-                                int input_idx = b * (in_c * input->h * input->w) +
-                                                c * (input->h * input->w) +
-                                                (i + m) * input->w +
-                                                (j + n);
-                                
-                                // Weight Index: [k, c, m, n]
-                                int weight_idx = k * (in_c * k_size * k_size) +
-                                                 c * (k_size * k_size) +
-                                                 m * k_size + 
-                                                 n;
-
-                                sum += input->data[input_idx] * layer->weights->data[weight_idx];
-                            }
-                        }
-                    }
-                    
-                    // Output Index: [b, k, i, j]
-                    int out_idx = b * (out_c * out_h * out_w) +
-                                  k * (out_h * out_w) +
-                                  i * out_w + 
-                                  j;
-
-                    output->data[out_idx] = sum + bias_val;
-                }
+            if (c == correct_label) {
+                total_loss += -logf(prob + 1e-7f); // Add epsilon to prevent log(0)
+                grad_input->data[b * classes + c] = (prob - 1.0f) / batch; // Normalize by batch size
+            } else {
+                grad_input->data[b * classes + c] = prob / batch;
             }
         }
     }
+    return total_loss / batch;
 }
 
 // ------------------------------------------------------------------
-// BACKWARD PASS
-// 1. dL/dW = Input * dL/dOutput (Convolution of Input and Output Gradients)
-// 2. dL/dX = dL/dOutput * W (Full convolution, usually via padding/rotation)
+Network* build_network(int batch_size) {
+    Network* net = (Network*)malloc(sizeof(Network));
+    
+    int in_h = 28, in_w = 28, in_c = 1;
+    
+    net->conv1 = create_conv_layer(in_c, 8, 3, in_h, in_w);
+    
+    int pool_out_h = 13;
+    int pool_out_w = 13;
+    
+    // Layer 3: Fully Connected
+    // Input Flattened: 8 * 13 * 13 = 1352
+    int fc_in_size = 8 * pool_out_h * pool_out_w;
+    int fc_out_size = 10;
+    net->fc1 = create_fc_layer(fc_in_size, fc_out_size);
+
+    // --- 2. Allocate Intermediate Buffers ---
+    // We allocate these ONCE to avoid fragmentation
+    net->input       = create_tensor(batch_size, 1, 28, 28);
+    net->t_conv1_out = create_tensor(batch_size, 8, 26, 26);
+    net->t_relu_out  = create_tensor(batch_size, 8, 26, 26);
+    net->t_pool_out  = create_tensor(batch_size, 8, 13, 13);
+    net->t_fc_out    = create_tensor(batch_size, 1, 1, 10); // Treating FC out as 1x1x10 or just flat 10
+
+    // --- 3. Allocate Gradient Buffers ---
+    net->t_fc_grad    = create_tensor(batch_size, 1, 1, 10);
+    net->t_pool_grad  = create_tensor(batch_size, 8, 13, 13);
+    net->t_relu_grad  = create_tensor(batch_size, 8, 26, 26);
+    net->t_conv1_grad = create_tensor(batch_size, 8, 26, 26);
+
+    return net;
+}
+
 // ------------------------------------------------------------------
-void conv2d_backward(ConvLayer* layer, Tensor* input, Tensor* output_grad, Tensor* input_grad) {
-    int batch = input->b;
-    int out_c = layer->output_channels;
-    int in_c = layer->input_channels;
-    int k_size = layer->kernel_size;
-    int out_h = output_grad->h;
-    int out_w = output_grad->w;
+// FORWARD & BACKWARD PIPELINE
+// ------------------------------------------------------------------
+float forward_backward_pass(Network* net, Tensor* input_batch, unsigned char* labels, float learning_rate) {
+    
+    memcpy(net->input->data, input_batch->data, net->input->total_size * sizeof(float));
 
-    // 1. Clear Gradients
-    for(int i=0; i<layer->grad_weights->total_size; i++) layer->grad_weights->data[i] = 0.0f;
-    for(int i=0; i<layer->grad_biases->total_size; i++) layer->grad_biases->data[i] = 0.0f;
-    if(input_grad) {
-        for(int i=0; i<input_grad->total_size; i++) input_grad->data[i] = 0.0f;
+    conv2d_forward(net->conv1, net->input, net->t_conv1_out);
+    relu_forward(net->t_conv1_out, net->t_relu_out);
+    max_pool_forward(net->t_relu_out, net->t_pool_out, 2, 2); // Kernel=2, Stride=2
+    fc_forward(net->fc1, net->t_pool_out, net->t_fc_out);
+
+    float loss = softmax_loss_backward(net->t_fc_out, labels, net->t_fc_grad);
+
+    fc_backward(net->fc1, net->t_pool_out, net->t_fc_grad, net->t_pool_grad);
+    
+    max_pool_backward(net->t_relu_out, net->t_pool_grad, net->t_relu_grad, 2, 2);
+    
+    relu_backward(net->t_conv1_out, net->t_relu_grad, net->t_conv1_grad);
+    
+    conv2d_backward(net->conv1, net->input, net->t_conv1_grad, NULL); 
+
+    return loss;
+}
+
+// ------------------------------------------------------------------
+// OPTIMIZER (SGD)
+// ------------------------------------------------------------------
+// In Distributed training, this is called AFTER MPI_Allreduce
+void optimizer_step(Network* net, float lr) {
+    // Update Conv1
+    #pragma omp parallel for
+    for (int i = 0; i < net->conv1->weights->total_size; i++) {
+        net->conv1->weights->data[i] -= lr * net->conv1->grad_weights->data[i];
+    }
+    #pragma omp parallel for
+    for (int i = 0; i < net->conv1->biases->total_size; i++) {
+        net->conv1->biases->data[i] -= lr * net->conv1->grad_biases->data[i];
     }
 
-    // 2. Compute Gradients for Weights and Biases
-    // Parallelize over Output Channels and Input Channels
-    #pragma omp parallel for collapse(2)
-    for (int k = 0; k < out_c; ++k) {
-        for (int c = 0; c < in_c; ++c) {
-            
-            // For this filter connection k->c, accumulate over the whole batch
-            for (int b = 0; b < batch; ++b) {
-                
-                // Convolve Input with Output Gradient
-                for (int m = 0; m < k_size; ++m) {
-                    for (int n = 0; n < k_size; ++n) {
-                        
-                        float dw_sum = 0.0f;
-
-                        for (int i = 0; i < out_h; ++i) {
-                            for (int j = 0; j < out_w; ++j) {
-                                
-                                int in_idx = b * (in_c * input->h * input->w) +
-                                             c * (input->h * input->w) +
-                                             (i + m) * input->w + (j + n);
-                                
-                                int grad_idx = b * (out_c * out_h * out_w) +
-                                               k * (out_h * out_w) +
-                                               i * out_w + j;
-
-                                dw_sum += input->data[in_idx] * output_grad->data[grad_idx];
-                            }
-                        }
-                        
-                        // Accumulate into Weight Gradient Tensor
-                        // Use atomic because other threads might process different batches 
-                        // (though here we put batch in inner loop, so atomic strictly not needed for this structure, 
-                        // but good practice if you re-order loops)
-                        int w_idx = k * (in_c * k_size * k_size) + c * (k_size * k_size) + m * k_size + n;
-                        
-                        #pragma omp atomic
-                        layer->grad_weights->data[w_idx] += dw_sum;
-                    }
-                }
-
-                // Bias Gradient: Just sum the Output Gradients
-                float db_sum = 0.0f;
-                for (int i = 0; i < out_h; ++i) {
-                    for (int j = 0; j < out_w; ++j) {
-                        int grad_idx = b * (out_c * out_h * out_w) + k * (out_h * out_w) + i * out_w + j;
-                        db_sum += output_grad->data[grad_idx];
-                    }
-                }
-                #pragma omp atomic
-                layer->grad_biases->data[k] += db_sum;
-            }
-        }
+    // Update FC1
+    #pragma omp parallel for
+    for (int i = 0; i < net->fc1->weights->total_size; i++) {
+        net->fc1->weights->data[i] -= lr * net->fc1->grad_weights->data[i];
     }
-
-    // 3. Compute Gradients for Input (Pass down to previous layer)
-    // Only needed if this isn't the very first layer
-    if (input_grad) {
-        #pragma omp parallel for collapse(2)
-        for (int b = 0; b < batch; ++b) {
-            for (int c = 0; c < in_c; ++c) {
-                
-                for (int k = 0; k < out_c; ++k) {
-                    for (int i = 0; i < out_h; ++i) {
-                        for (int j = 0; j < out_w; ++j) {
-                            
-                            int grad_idx = b * (out_c * out_h * out_w) + k * (out_h * out_w) + i * out_w + j;
-                            float grad_val = output_grad->data[grad_idx];
-
-                            for (int m = 0; m < k_size; ++m) {
-                                for (int n = 0; n < k_size; ++n) {
-                                    
-                                    int w_idx = k * (in_c * k_size * k_size) + c * (k_size * k_size) + m * k_size + n;
-                                    int in_idx = b * (in_c * input->h * input->w) + c * (input->h * input->w) + (i + m) * input->w + (j + n);
-
-                                    // Atomic add because patches overlap
-                                    #pragma omp atomic
-                                    input_grad->data[in_idx] += grad_val * layer->weights->data[w_idx];
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    #pragma omp parallel for
+    for (int i = 0; i < net->fc1->biases->total_size; i++) {
+        net->fc1->biases->data[i] -= lr * net->fc1->grad_biases->data[i];
     }
+}
+
+void free_network(Network* net) {
+    // Free intermediate tensors
+    free_tensor(net->input);
+    free_tensor(net->t_conv1_out);
+    free_tensor(net->t_relu_out);
+    free_tensor(net->t_pool_out);
+    free_tensor(net->t_fc_out);
+    free_tensor(net->t_fc_grad);
+    free_tensor(net->t_pool_grad);
+    free_tensor(net->t_relu_grad);
+    free_tensor(net->t_conv1_grad);
+
+    // Free layers (You'll need to implement free_conv_layer etc in their files)
+    // free(net->conv1); 
+    // free(net->fc1);
+    free(net);
 }
