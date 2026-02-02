@@ -1,0 +1,265 @@
+\documentclass[12pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{geometry}
+\usepackage{float}
+
+\geometry{
+    a4paper,
+    margin=1in
+}
+\usepackage{listings}
+\usepackage{xcolor}
+
+% Define custom colors for syntax highlighting
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\definecolor{backcolour}{rgb}{0.95,0.95,0.92}
+
+% specific style for C code
+\lstdefinestyle{c_style}{
+    backgroundcolor=\color{backcolour},   
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{magenta},
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{codepurple},
+    basicstyle=\ttfamily\footnotesize,
+    breakatwhitespace=false,         
+    breaklines=true,                 
+    captionpos=b,                    
+    keepspaces=true,                 
+    numbers=left,                    
+    numbersep=5pt,                  
+    showspaces=false,                
+    showstringspaces=false,
+    showtabs=false,                  
+    tabsize=4,
+    language=C
+}
+\lstset{style=c_style}
+\usepackage{titlesec}
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{listings}
+\usepackage{xcolor}
+\lstset{
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue},
+    commentstyle=\color{gray},
+    stringstyle=\color{red},
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    frame=single,
+    breaklines=true,
+    captionpos=b
+}
+\usepackage{hyperref}
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    urlcolor=cyan
+}
+\usepackage{float}
+\begin{document}
+
+\begin{titlepage}
+    \centering
+    \vspace*{1cm}
+    \includegraphics[width=0.35\textwidth]{aauLogo.png}\par
+    \vspace{1.2cm}
+    {\huge \bfseries Implementation Report on Distributed CNN using OpenMP and MPI \par}
+    \vspace{2.5cm}
+    {\Large
+    \begin{tabular}{ll}
+    
+    Nahom Senay & GSR/4848/17 \\
+    
+    
+    
+    \end{tabular}
+    \\[0.5cm]
+    Submitted to: Beakal Gizachew Assefa (PhD) \\
+    Github Link: https://github.com/Nahom32/Distributed-CNN
+    }\par
+    \vspace{5cm}
+    {\large
+    Addis Ababa University \\[0.2cm]
+    January 2026
+    }\par
+\end{titlepage}
+
+\section{Introduction}
+Deep learning architectures and algorithms are known to be resource intensive. The resource in this context implies both data and compute. It has been estimated that a deep learning model operates optimally if one has 5000 data instances for every feature \cite{Goodfellow2016} .
+\par This has created a need for leveraging distribution and parallelization for training these models \cite{Langer2020Distributed}. For instance, Alexnet \cite{Krizhevsky2012AlexNet} used parallel programming to distribute the convolution and training computation on separate GPUs. There capacity to use parallelized GPU programming enabled them to beat the ILSVRC benchmark of 2012. Furthermore, it showed that neural networks are scalable as long as data and compute resources are provided.
+\par Since the early 2010s, state-of-the-art hardware has been ripe enough to support the compute and memory requirements of deep learning models. This has made them the go-to approach to Artificial Intelligence.
+\section{Model Selection and Serial Baseline}
+\subsection{Dataset Selection}
+The implemented model is trained on the MNIST dataset \cite{LeCun1998MNIST}. This dataset contains 60,000 handwritten digits images from 0-9. 
+\subsection{Model Design}
+The model selected in this parallelization experiment is the Convolutional Neural Network (CNN). The input layer expects a grayscale image of $28\times28$ pixels. 
+\par The convolution layer has a kernel size of $3 \texttimes 3$. The convolution layer contains eight filters. The output layer of the convolution layer is $28 \times 28 \times 8$ with 8 separate feature maps. 
+\par The activation function used in the internal layers is the ReLU (Rectified Linear Unit). 
+$$f(x) = max(0,x)$$
+\par The softmax function has been used in the output layer to identify which number has the highest probability. 
+$$f(x) = \frac{exp(z_i)}{\sum_i^n exp(z_i)}$$
+\par Max Pooling was used for the pooling layer. The window size of the max pool layer was $2\times 2$. The pooling layer had an output dimension of $13\times13\times8$. Before entering the fully-connected layer, A flattening layer was implemented that converts the tensor to a 1D matrix. 
+
+\par The fully connected layer is a multi-layered perceptron with a softmax output that can give a probabilistic rank for [0-9] with values $0 \le x \le 1$. The following is a table summarizing the overall cnn architecture.
+\par The loss calculation used for this experiment is the \textbf{cross-entropy loss} given by the following equation:
+\begin{equation}
+    L = -\sum_{i=1}^{C} y_i \log(\hat{y}_i)
+\end{equation}
+\begin{table}[htbp]
+    \centering
+    \caption{Summary of Tensor Transformations in the CNN Architecture}
+    \label{tab:cnn_architecture}
+    \begin{tabular}{lccc}
+        \toprule
+        \textbf{Layer Type} & \textbf{Input Dimension} & \textbf{Operation Details} & \textbf{Output Dimension} \\
+        \midrule
+        Input & $28 \times 28 \times 1$ & Raw Grayscale Image & - \\
+        \addlinespace
+        Convolution (Conv2D) & $28 \times 28 \times 1$ & 8 Filters, $3 \times 3$ Kernel, Stride 1 & $26 \times 26 \times 8$ \\
+        Activation (ReLU) & $26 \times 26 \times 8$ & Element-wise $\max(0, x)$ & $26 \times 26 \times 8$ \\
+        Max Pooling & $26 \times 26 \times 8$ & $2 \times 2$ Kernel, Stride 2 & $13 \times 13 \times 8$ \\
+        \addlinespace
+        Flatten & $13 \times 13 \times 8$ & Reshape 3D Volume to 1D Vector & $1352$ \\
+        Fully Connected (FC) & $1352$ & Matrix Mult. ($10 \times 1352$) + Bias & $10$ \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+
+
+\section{Parallelization Strategies}
+\subsection{Data Parallelism}
+In this experiment, the parallelization strategies followed the hybrid parallelism model. It combines both Distributed Data Parallelism via MPI with Shared-Memory Parallelism of OpenMP. The MPI acts as a manager of different independent processes with sharded data. The data set at hand is divided into four separate processes in equal measure. This means that each process will get 15,000 shards of the dataset. The rationale of using this approach is to utilize the available cores and have a better load balancing between the cores of the system. 
+\par Every MPI rank initializes the parameters of the Neural Network (weights $W$ and Biases $b$) on its memory space. Then each rank processes the batch it sharded and computes the local weight separately. Before updating the weights, all the processes are paused via a barrier. Then the gradients are summed from all the ranks on a master core and sent to the processes. The algorithm used is for the gradient optimization is the stochastic gradient descent algorithm distributed over the nodes. 
+\subsection{Task Parallelism}
+Inside every computing element (node), OpenMP has been used to parallelize the heavy computation involved for the convolution operation and the max pooling operation. This is made to leverage the shared memory of a single process. This helps to utilize the Arthimetic and Logic Unit of the CPU cores. 
+\begin{lstlisting}[caption={OpenMP Parallelization Strategy using Loop Collapsing}, label={lst:omp_example}]
+#pragma omp parallel for collapse(2)
+for (int b = 0; b < batch_size; ++b) {       // Split Batch
+    for (int o = 0; o < out_channels; ++o) { // Split Filters
+        // ... Thread does the heavy lifting here ...
+    }
+}
+\end{lstlisting}
+
+
+\section{Experimental Setup}
+\par The experiments were conducted on a single node equipped with an \textbf{m4 macbook air} device. The compiler used for the experiment was Apple Clang 16.0.0, with OpenMPI 5.0. The visualization experiments where performed using python matplotlib and the subprocess library to run the cnn training binary. In addition to these, scaling experiments have been implemented as the number cores involved increases.
+\par The hyperparameters used for the experiment were described as follows:
+\begin{table}[htbp]
+    \centering
+    \caption{Experimental Setup and System Specifications}
+    \label{tab:experimental_setup}
+    \begin{tabular}{ll}
+        \toprule
+        \textbf{Component} & \textbf{Specification} \\
+        \midrule
+        \textbf{Hardware} & Apple M4 Processor (SoC) \\
+        \textbf{Memory} & Unified Memory Architecture (UMA) \\
+        \textbf{OS} & macOS Sequoia \\
+        \addlinespace
+        \textbf{Compiler} & Apple Clang 16.0.0 (-O3 optimization) \\
+        \textbf{MPI} & OpenMPI v5.0 \\
+        \textbf{OpenMP} & LLVM libomp \\
+        \addlinespace
+        \textbf{Dataset} & MNIST (60k Train / 10k Test) \\
+        \textbf{Batch Size} & 32 (Per Rank) \\
+        \textbf{Learning Rate} & 0.01 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+\section{Performance Evaluation and Comparison}
+The performance of the parallelized with 4 ranks were trained on 5 epochs had the following results:
+\begin{table}[htbp]
+    \centering
+    \caption{Training Metrics over 5 Epochs (Distributed CNN)}
+    \label{tab:training_results}
+    \begin{tabular}{ccc}
+        \toprule
+        \textbf{Epoch} & \textbf{Training Loss} & \textbf{Test Accuracy (\%)} \\
+        \midrule
+        1 & 1.0758 & 88.19 \\
+        2 & 0.3996 & 90.30 \\
+        3 & 0.3483 & 90.90 \\
+        4 & 0.3262 & 91.29 \\
+        5 & 0.3118 & 91.55 \\
+        \bottomrule
+        \multicolumn{3}{r}{\small \textit{Total Training Time: 45.97 seconds}} \\
+    \end{tabular}
+\end{table}
+The following is the implementation of the serial cnn training with no MPI sharding.
+\begin{table}[htbp]
+    \centering
+    \caption{Performance Comparison: Serial vs. Distributed (4 Ranks)}
+    \label{tab:speedup_comparison}
+    \begin{tabular}{lccc}
+        \toprule
+        \textbf{Execution Mode} & \textbf{Processors} & \textbf{Total Time (s)} & \textbf{Speedup Factor} \\
+        \midrule
+        Serial Baseline & 1 & 163.60 & 1.00x \\
+        Distributed (MPI+OpenMP) & 4 & 45.97 & \textbf{3.56x} \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+The following is a comparison is between the serial and distributed training. It has been shown that the serial code has better performed in terms of accuracy. 
+\begin{table}[htbp]
+    \centering
+    \caption{Training Convergence Comparison (Serial vs. Distributed)}
+    \label{tab:convergence_comparison}
+    \begin{tabular}{c|cc|cc}
+        \toprule
+        & \multicolumn{2}{c|}{\textbf{Serial Training}} & \multicolumn{2}{c}{\textbf{Distributed Training}} \\
+        \textbf{Epoch} & \textbf{Loss} & \textbf{Accuracy (\%)} & \textbf{Loss} & \textbf{Accuracy (\%)} \\
+        \midrule
+        1 & 0.5432 & 90.52 & 1.0758 & 88.19 \\
+        2 & 0.3061 & 91.50 & 0.3996 & 90.30 \\
+        3 & 0.2737 & 92.46 & 0.3483 & 90.90 \\
+        4 & 0.2452 & 93.21 & 0.3262 & 91.29 \\
+        5 & 0.2174 & 93.97 & 0.3118 & 91.55 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\begin{figure}[htbp]
+    \centering
+    % Change 'plot_speedup.png' to your actual filename
+    \includegraphics[width=0.8\textwidth]{serial_disitributed.png}
+    \caption{Speedup of Distributed Training}
+    \label{fig:Serial vs Distributed Training}
+\end{figure}
+The following  result is the speed up as the number of cores increases
+\begin{figure}[htbp]
+    \centering
+    % Change 'plot_speedup.png' to your actual filename
+    \includegraphics[width=0.8\textwidth]{speedup_analysis.png}
+    \caption{fig: Analysis of the number of cores}
+    \label{fig:Analysis of number of cores}
+\end{figure}
+The following is the training loss and accuracy curve for the distributed processing CNN algorithm.
+\begin{figure}[H]
+    \centering
+    % Change 'plot_speedup.png' to your actual filename
+    \includegraphics[width=0.8\textwidth]{training_metrics.png}
+    \caption{fig: Distributed CNN Training}
+    \label{fig:Distributed CNN Training}
+\end{figure}
+
+
+\section{Discussion}
+It has been shown that the distributed code has 3.56 times faster than the serial code. This is because of the load has been distributed to the different cores available. Furthermore it has been shown that as the number of mpi cores increase, the speedup will scale faster. But it has been shown that it didn't reach the perfect speed up line. This can be attributed to the overhead of spawning different threads has additional overhead on the system. 
+\par The serial code has shown to be slightly better in accuracy this can be attributed to the less updates done on each core which will slightly affect the performance of the algorithm. This is because we are using the \textbf{stochastic gradient descent} algorithm.
+\bibliographystyle{IEEEtran}
+\bibliography{references}
+\end{document}
