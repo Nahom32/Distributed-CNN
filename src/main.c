@@ -45,8 +45,7 @@ int main(int argc, char** argv) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &world_size);
 
-    // 1. Parse Epochs from Command Line
-    int epochs = 5; // Default
+    int epochs = 5; 
     if (argc > 1) {
         epochs = atoi(argv[1]);
     }
@@ -66,9 +65,7 @@ int main(int argc, char** argv) {
     Tensor* batch_input = create_tensor(BATCH_SIZE, 1, 28, 28);
     unsigned char* batch_labels = (unsigned char*)malloc(BATCH_SIZE);
     
-    // Prepare temporary Tensor wrapper for the full local dataset (for evaluation)
     Tensor* local_test_tensor = create_tensor(test_data.size, 1, 28, 28);
-    // Copy data once to avoid recopying during eval loop
     #pragma omp parallel for
     for(int i=0; i<test_data.size * 784; i++) local_test_tensor->data[i] = test_data.images[i];
 

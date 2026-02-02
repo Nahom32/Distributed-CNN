@@ -4,7 +4,6 @@ import re
 import time
 import os
 
-# --- CONFIGURATION ---
 EXECUTABLE = "./../build/cnn_dist"
 
 EPOCHS = 5
@@ -113,14 +112,11 @@ if __name__ == "__main__":
         ep, loss, acc = parse_metrics(output)
         plot_training_curves(ep, loss, acc)
 
-    # 2. VISUALIZE SPEEDUP
-    # Run short epochs just to measure speed
     print("\n--- Phase 2: Speedup Analysis ---")
     times = []
     valid_procs = []
 
     for p in PROCESSOR_COUNTS:
-        # Run for only 1 epoch to save time during benchmarking
         out = run_experiment(n_procs=p, n_epochs=1)
         if out:
             t = parse_time(out)
