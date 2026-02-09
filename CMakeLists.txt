@@ -32,7 +32,7 @@ include_directories(
 )
 
 set(SOURCES
-    src/serial_main.c
+    src/main.c
     src/cnn.c
     src/layers/conv.c
     src/layers/pool.c

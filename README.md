@@ -60,9 +60,32 @@ The project uses CMake to build the source code. To build the project, follow th
 
 ## How to Run
 
-To run the project, you will need to have MPI installed on your system. You can then run the project using the `mpirun` command.
+To run the project, you will need to have MPI installed on your system. You can then run the project using the `mpirun` command. The executable `cnn_dist` takes the number of epochs as a command line argument.
 
 ```bash
-mpirun -np <num_processes> ./<executable_name>
+mpirun -np <num_processes> ./cnn_dist <epochs>
 ```
 
+Example:
+```bash
+mpirun -np 4 ./cnn_dist 5
+```
+
+## Benchmarks
+
+### Performance Comparison
+
+| Execution Mode           | Processors | Total Time (s) | Speedup Factor |
+| ------------------------ | ---------- | -------------- | -------------- |
+| Serial Baseline          | 1          | 163.60         | 1.00x          |
+| Distributed (MPI+OpenMP) | 4          | 45.97          | **3.56x**      |
+
+### Training Convergence Comparison
+
+| Epoch | Serial Training Loss | Serial Training Accuracy (%) | Distributed Training Loss | Distributed Training Accuracy (%) |
+| ----- | -------------------- | ---------------------------- | ------------------------- | ------------------------------- |
+| 1     | 0.5432               | 90.52                        | 1.0758                    | 88.19                           |
+| 2     | 0.3061               | 91.50                        | 0.3996                    | 90.30                           |
+| 3     | 0.2737               | 92.46                        | 0.3483                    | 90.90                           |
+| 4     | 0.2452               | 93.21                        | 0.3262                    | 91.29                           |
+| 5     | 0.2174               | 93.97                        | 0.3118                    | 91.55                           |
